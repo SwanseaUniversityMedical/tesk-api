@@ -1,0 +1,90 @@
+name: PR Update
+
+on:
+  push:
+    paths:
+      - "src/**"
+      - "Dockerfile"
+    branches:
+      - '**'
+
+env:
+  HARBOR_REGISTRY: ${{ vars.HARBOR_REGISTRY }}
+  HARBOR_PROJECT: ${{ vars.HARBOR_PROJECT }}
+  HARBOR_REPO: "tesk"
+  HARBOR_USER: ${{ vars.HARBOR_USER }}
+  HARBOR_TOKEN: ${{ secrets.HARBOR_TOKEN }}
+
+jobs:
+  docker:
+    runs-on: [self-hosted, linux, x64]
+
+    steps:
+      - name: Generate build ID 
+        id: prep
+        run: |
+            if [[ $GITHUB_REF != 'refs/heads/master' ]]
+            then
+              branch=${GITHUB_REF##*/}
+              sha=${GITHUB_SHA::8}
+              echo "::set-output name=BUILD_ID::${branch}-${sha}" 
+              echo "::set-output name=BUILD_ID_LATEST::${branch}-latest"
+            elif [[ $GITHUB_REF == 'refs/heads/master' ]] 
+            then
+              branch=master
+              sha=${GITHUB_SHA::8}
+              echo "::set-output name=BUILD_ID::${branch}-${sha}" 
+              echo "::set-output name=BUILD_ID_LATEST::${branch}-latest"   
+            else
+              tag=${GITHUB_REF##*_}
+              echo "::set-output name=BUILD_ID::${tag}" 
+              echo "::set-output name=BUILD_ID_LATEST::latest"
+            fi
+
+      - name: clone repo
+        uses: actions/checkout@v3
+
+      - uses: dorny/paths-filter@v2
+        id: container-changes
+        with:
+          filters: |
+            src:
+              - '.github/workflows/**'
+              - 'src/**'
+              - 'Dockerfile'
+
+      - name: setup mvn
+        uses: s4u/setup-maven-action@v1.9.0
+        if: steps.container-changes.outputs.src == 'true'
+        with:
+          java-version: 8
+          maven-version: '4.0.0'
+
+      - name: build-mvn-tesk
+        if: steps.container-changes.outputs.src == 'true'
+        run: ./mvnw clean verify
+
+      - name: build container
+        if: steps.container-changes.outputs.src == 'true'
+        run: |
+          docker build -t image -f "Dockerfile" .
+
+      - name: Login to Harbor
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.HARBOR_REGISTRY }}
+          username: ${{ env.HARBOR_USER }}
+          password: ${{ env.HARBOR_TOKEN }}
+
+      - name: container push to registry
+        id: container-push
+        if: steps.container-changes.outputs.src == 'true'
+        run: |
+          docker tag image $HARBOR_REGISTRY/$HARBOR_PROJECT/$HARBOR_REPO:$TAG
+          docker push $HARBOR_REGISTRY/$HARBOR_PROJECT/$HARBOR_REPO:$TAG
+          docker tag image $HARBOR_REGISTRY/$HARBOR_PROJECT/$HARBOR_REPO:$LATEST_TAG
+          docker push $HARBOR_REGISTRY/$HARBOR_PROJECT/$HARBOR_REPO:$LATEST_TAG
+        env:
+          TAG: ${{ steps.prep.outputs.BUILD_ID }}
+          LATEST_TAG: ${{ steps.prep.outputs.BUILD_ID_LATEST }}
+
